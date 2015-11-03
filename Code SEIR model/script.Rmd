@@ -1,0 +1,215 @@
+---
+title: "Results SEIR model"
+author: "Eva Santermans"
+date: '`r format(Sys.time(), ''%d %B, %Y'')`'
+output: html_document
+---
+
+```{r,echo=FALSE,message=FALSE}
+########################################################
+# Modelling the Ebola outbreak in West Africa 
+# SEIR model & MCMC estimation
+########################################################
+# Author: Eva Santermans
+# Last update: July 17, 2015
+########################################################
+
+## SELECT WORKING DIRECTORY
+wd = "C:/Eva/CenStat/Projects/Ebola/Programs - Output/Test/"
+setwd(wd)
+
+## SELECT REGION
+GEOSEL = "Forecariah"
+
+```
+
+
+```{r,include=FALSE}
+########################################################################################
+## LIBRARIES
+
+library(knitr) 
+library(markdown)
+library(xlsx)
+library(MASS)
+Sys.setlocale("LC_TIME", "C");
+```
+
+```{r,echo=FALSE}
+########################################################################################
+## CONSTANTS
+
+## Constants
+precision=0.1 # precision ODE (days)
+pwc.int=21    # period piece-wise constant (days)
+```
+
+```{r,include=FALSE}
+########################################################################################
+## FUNCTIONS
+
+source("data.R")
+source("core.R")
+```
+
+```{r,echo=FALSE}
+########################################################################################
+## INPUT 
+
+## Reference data 
+index1.cum=diff(rep(cumsum(!is.na(cumcases)),each=1/precision)) # create an index vector to show what period cumulative cases refer to
+index2.cum=diff(rep(cumsum(!is.na(deaths)),each=1/precision)) # create an index vector to show what period cumulative deaths refer to
+obs1=c(cumcases[!is.na(cumcases)][1],newcases[!is.na(newcases)])
+obs2=c(deaths[!is.na(deaths)][1],newdeaths[!is.na(newdeaths)])
+
+## Data frame
+J = 5 + n.breaks
+mon.names = c("LP","Overdisp1","Overdisp2","E(0)","Proportion fatal","Underreporting","R0",as.parm.names(list(r=rep(0,n.breaks-1))))
+parm.names = as.parm.names(list(beta=rep(0,J)))
+MyData = list(J=J, mon.names=mon.names, parm.names=parm.names,y=c(obs1,obs2))
+```
+
+
+```{r,include=FALSE}
+########################################################################################
+## ESTIMATION
+
+
+## Settings
+## --------
+
+set.seed(666)
+
+## Run
+## ---
+
+Initial.Values = NULL
+res <- LaplacesDemon(Model, Data=MyData, Initial.Values,
+                     Iterations=2500000, Status=43898, Thinning=500,
+                     Algorithm="AMM", Specs=list(Adaptive=25, B=NULL, n=525000,
+                                               Periodicity=898, w=0.05))
+
+## Save and load most recent model
+## -------------------------------
+
+name = paste("SEIR_",GEOSEL,".Rdata",sep="")
+save(res, file = name)
+```
+
+# OUTPUT 
+```{r,include=FALSE}
+########################################################################################
+## CHECKING OUTPUT
+
+## Recommended burn-in for the thinned samples
+BurnIn = res$Rec.BurnIn.Thinned
+BurnIn
+
+```
+
+```{r,include=FALSE}
+## Trace plots
+plot(res,BurnIn=1,MyData,PDF=F,Parms=c(0))
+```
+
+```{r,include=FALSE}
+## Posterior distribution states
+post = res$Monitor[-c(1:BurnIn),-1]
+E = matrix(NA,dim(post)[1],length(time)); Id = matrix(NA,dim(post)[1],length(time));
+Inew = matrix(NA,dim(post)[1],length(time)); M = matrix(NA,dim(post)[1],length(time));
+for (i in 1:dim(post)[1]){
+  ode=ODEfuncpwc(post[i,],n.cutoffs)
+  E[i,] = ode$E; Id[i,] = ode$Id; Inew[i,] = ode$Inew; M[i,] = ode$M
+}
+```
+
+## Observed and estimated number of cases and deaths. 
+```{r,echo=FALSE, fig.width=7, fig.height=7}
+rho1 = post[,5];
+rho2 = post[,5];
+alpha = 1/7.5
+preinfperiod = 9.4
+
+
+sel1 = (length(seq(as.Date("2014-05-23"),min(dates1,na.rm=T),1))-1)*10
+sel2 = (length(seq(as.Date("2014-05-23"),min(dates2,na.rm=T),1))-1)*10
+time1 = time[1:(length(time)-sel1)]
+time2 = time[1:(length(time)-sel2)]
+
+med.Inew = apply(1/preinfperiod*rho1*E,2,median); 
+med.M = apply(rho2*alpha*Id,2,median);
+med.Inew.cum = apply(rho1*Inew,2,median);
+med.M.cum = apply(rho2*M,2,median);
+q1.Inew = apply(1/preinfperiod*rho1*E,2,quantile,0.025,na.rm=T); 
+q1.M = apply(rho2*alpha*Id,2,quantile,0.025,na.rm=T);
+q1.Inew.cum = apply(rho1*Inew,2,quantile,0.025,na.rm=T);
+q1.M.cum = apply(rho2*M,2,quantile,0.025,na.rm=T);
+q3.Inew = apply(1/preinfperiod*rho1*E,2,quantile,0.975,na.rm=T); 
+q3.M = apply(rho2*alpha*Id,2,quantile,0.975,na.rm=T);
+q3.Inew.cum = apply(rho1*Inew,2,quantile,0.975,na.rm=T);
+q3.M.cum = apply(rho2*M,2,quantile,0.975,na.rm=T);
+
+## plot
+par(mfrow=c(2,2),oma = c(0, 0, 2, 0)) 
+
+plot(min(dates1,na.rm=T)+time1,med.Inew[-c(1:sel1)],type="l",xlab="time (in days)",xlim=c(min(dates),max(c(dates1,dates2)+21,na.rm=T)),ylab="cases",ylim=c(0,max(newcases[!is.na(newcases)]/tmp1)*1.2),lwd=2,col="#0571B0")
+lines(min(dates1,na.rm=T)+time1,q3.Inew[-c(1:sel1)],type="l",lty=2,lwd=2,col="#0571B0")
+lines(min(dates1,na.rm=T)+time1,q1.Inew[-c(1:sel1)],type="l",lty=2,lwd=2,col="#0571B0")
+points(dates[!is.na(newcases)]-round(tmp1/2),newcases[!is.na(newcases)]/tmp1,col="black",lwd=1,pch=16)
+
+plot(min(dates2,na.rm=T)+time2,med.M[-c(1:sel2)],type="l",xlab="time (in days)",xlim=c(min(dates),max(c(dates1,dates2)+21,na.rm=T)),ylab="deaths",ylim=c(0,max(newdeaths[!is.na(newdeaths)]/tmp2)*1.2),lwd=2,col="#0571B0")
+lines(min(dates2,na.rm=T)+time2,q1.M[-c(1:sel2)],type="l",lty=2,lwd=2,col="#0571B0")
+lines(min(dates2,na.rm=T)+time2,q3.M[-c(1:sel2)],type="l",lty=2,lwd=2,col="#0571B0")
+points(dates[!is.na(newdeaths)]-round(tmp2/2),newdeaths[!is.na(newdeaths)]/tmp2,col="black",lwd=1,pch=16)
+
+plot(min(dates1,na.rm=T)+time1,med.Inew.cum[-c(1:sel1)],type="l",xlab="time (in days)",xlim=c(min(dates),max(c(dates1,dates2)+21,na.rm=T)),ylab="cumulative cases",ylim=c(0,max(q3.Inew.cum[1:(length(time)-560)],na.rm=T)),lwd=2,col="#0571B0")
+lines(min(dates1,na.rm=T)+time1,q1.Inew.cum[-c(1:sel1)],type="l",lty=2,lwd=2,col="#0571B0")
+lines(min(dates1,na.rm=T)+time1,q3.Inew.cum[-c(1:sel1)],type="l",lty=2,lwd=2,col="#0571B0")
+points(dates[!is.na(cumcases)],cumcases[!is.na(cumcases)],col="black",lwd=1,pch=16)
+
+plot(min(dates2,na.rm=T)+time2,med.M.cum[-c(1:sel2)],type="l",xlab="time (in days)",xlim=c(min(dates),max(c(dates1,dates2)+21,na.rm=T)),ylab="cumulative deaths",ylim=c(0,max(q3.M.cum[1:(length(time)-560)],na.rm=T)),lwd=2,col="#0571B0")
+lines(min(dates2,na.rm=T)+time2,q1.M.cum[-c(1:sel2)],type="l",lty=2,lwd=2,col="#0571B0")
+lines(min(dates2,na.rm=T)+time2,q3.M.cum[-c(1:sel2)],type="l",lty=2,lwd=2,col="#0571B0")
+points(dates[!is.na(deaths)],deaths[!is.na(deaths)],col="black",lwd=1,pch=16)
+
+mtext(GEOSEL, outer = TRUE, cex = 1.5, line=-1)
+```
+Observed (black) and estimated (blue) number of new cases (top left), new deaths (top right), cumulative cases (bottom left) and cumulative deaths (bottom right) per district. Dashed lines are 95% credible intervals. 
+
+## Estimated effective reproduction number over time. 
+```{r,echo=FALSE}
+Rvec = post[,6:J]
+R = NULL
+R = cbind(R,Rvec[,1])
+
+for (i in 2:dim(Rvec)[2]){
+  R = cbind(R,apply(Rvec[,1:i],1,sum))
+}
+
+med = apply(R,2,median); 
+q1 = apply(R,2,quantile,0.025,na.rm=T); 
+q3 = apply(R,2,quantile,0.975,na.rm=T); 
+
+med.R = NULL; q1.R = NULL; q3.R = NULL
+for (i in 1:(n.breaks)){
+  med.R = c(med.R,rep(med[i],n.cutoffs[i]))
+  q1.R = c(q1.R,rep(q1[i],n.cutoffs[i]))
+  q3.R = c(q3.R,rep(q3[i],n.cutoffs[i]))
+}
+
+## plot
+par(mfrow=c(1,1),oma = c(0, 0, 2, 0)) #
+plot(min(dates1,na.rm=T)+time1,med.R[-c(1:sel1)],col="black",type="l",xlab="time (in days)",ylab=expression(paste(R[e],"(t)")),xlim=c(min(dates),max(c(dates1,dates2)+21,na.rm=T)),ylim=c(0,5),lwd=2)
+
+lines(min(dates1,na.rm=T)+time1,q1.R[-c(1:sel1)],col="black",type="l",lty=2,lwd=2)
+lines(min(dates1,na.rm=T)+time1,q3.R[-c(1:sel1)],col="black",type="l",lty=2,lwd=2)
+abline(h=1,col="red")
+
+mtext(GEOSEL, outer = TRUE, cex = 1.5, line=-1)
+```
+Estimated reproduction number per district with 95% posterior intervals. The threshold value of 1 is indicated by a red horizontal line. 
+
+## Parameter estimates with 95% posterior confidence intervals. 
+```{r,echo=FALSE}
+res$Summary2[(J+3):(2*J+2),c(5:7)]
+```

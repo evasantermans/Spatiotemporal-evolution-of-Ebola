@@ -1,0 +1,982 @@
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+# Modelling the Ebola outbreak in West Africa anno 2014
+# Date: July 10, 2015
+########################################################
+library(knitr) 
+library(markdown)
+library(xlsx)
+```
+
+---
+title: "Results growth rate model"
+author: "Christel Faes"
+date:  "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+  
+  # Ebola Working Document: SPATIAL ANALYSIS
+  ## Christel Faes
+  ## 29 Oct 2014
+  
+  This document contains the R-code for the analysis of the Ebola outbreak data (case notifications) using linear and non-linear spatial growth models.
+
+### 1) Data section
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+##setwd("~/Dropbox/Christel/ONDERZOEK/DataSets/ebola")
+
+# Load R libraries
+#-----------------
+library(maptools); library(maps); library(RColorBrewer);
+library(shapefiles); 
+library(INLA);library(MASS)
+library(survey)
+library(RColorBrewer)
+library(classInt)
+library(spdep)
+options(java.parameters = "-Xmx1000m") 
+library(xlsx)
+```
+
+#### Reading case notifications per area
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+# Read in data
+#df=read.xlsx("~/Dropbox/Christel/Onderzoek/datasets/Ebola/Data/EVD_dbase_Reprod_Number_estimation_Macro_20150630.xlsm",sheetIndex=1,startRow=2)
+
+df=read.table("~/R/Rprojects/Ebola model/data.csv",header=T,sep=',')
+df<-data
+
+# Drop missing data
+df<-df[!is.na(df$Week),]
+df<-df[(df$Week!="1900-00"),]
+#df<-df[(df$Week!="2015-06"),]
+#df<-df[(df$Week!="2015-07"),]
+
+df$week<-(as.numeric(substr(df$Week,3,4)) -14)*52 + as.numeric(substr(df$Week,6,7))
+df$week<-df$week-min(df$week)
+
+df$CountW<-as.numeric(as.character(df$CountW))
+
+# Drop missing data
+df<-df[!is.na(df$CountW),]
+df<-df[!is.na(df$GEO_ID),]
+df<-df[,c(1,2,3,5,6,9,11,16)]
+
+# The next areas are not being considered in the analysis
+df<-df[df$Outside.West.Africa=="NO",]
+
+df<-df[df$PARENT_COUNTRY_NAM!="Nigeria",]
+df<-df[df$PARENT_COUNTRY_NAM!="Senegal",]
+df<-df[df$PARENT_COUNTRY_NAM!="Mali",]
+
+# Correction in geographical areas  / areas not in shape file
+df$GEO_NAME[df$GEO_NAME == "bo"] <- "Bo"
+
+df<-df[df$GEO_ID != "GNG240735",]
+df<-df[df$GEO_ID != "GNG240736",]
+df<-df[df$GEO_ID != "GNG240734",]
+df<-df[df$GEO_ID != "GNG240711",]
+df<-df[df$GEO_ID != "GNG240733",]
+
+# Order data
+df<-df[order(df$week),]
+df<-df[order(df$GEO_ID),]
+
+
+
+```
+
+#### Reading shape file
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+map<-readShapePoly("~/admin2/SL_GN_LR_polygons.shp")
+
+# Plot of countries
+plotvar <- map$CNTR_ID
+plotclr <- c("red","green","blue")
+class <- as.numeric(plotvar)
+colcode <- plotclr[class]
+
+dev.new()
+plot(map)
+plot(map, col=colcode, add=T)
+legend(-15,7 ,legend=unique(df$PARENT_COUNTRY_NAME), fill= c("red","green","blue"), cex=1, bty="n")
+centroids <- coordinates(map)
+
+
+
+
+# The next areas are not being considered (no cases in these areas reported)
+map<-map[map@data$GEO_ID != "GNG240724",] 
+map<-map[map@data$GEO_ID != "GNG240732",] 
+map<-map[map@data$GEO_ID != "GNG240733",] 
+map<-map[map@data$GEO_ID != "GNG240734",] 
+map<-map[map@data$GEO_ID != "GNG240735",] 
+map<-map[map@data$GEO_ID != "GNG240736",] 
+map<-map[map@data$GEO_ID != "GNG240711",]   # Koundara
+map<-map[map@data$GEO_ID != "GNG240712",]   # Dixinn
+map<-map[map@data$GEO_ID != "GNG240713",]   # Kaloum
+map<-map[map@data$GEO_ID != "GNG240714",]   # Matam
+map<-map[map@data$GEO_ID != "GNG240715",]   # Matoto
+map<-map[map@data$GEO_ID != "GNG240716",]   # Ratoma
+
+# Order areas
+map<-map[order(map@data$GEO_ID),]
+centroids <- coordinates(map)
+
+# Plot of countries
+plotvar <- map$CNTR_ID
+plotclr <- c("red","green","blue")
+class <- as.numeric(plotvar)
+colcode <- plotclr[class]
+
+plot(map)
+plot(map, col=colcode, add=T)
+legend(-15,7 ,legend=unique(df$PARENT_COUNTRY_NAME), fill= c("red","green","blue"), cex=1, bty="n")
+text(centroids, label=map@data$GEO_NAME,cex=0.3)
+
+
+```
+
+#### In Summary:
+
+- Country of interest  is `r unique(df$PARENT_COUNTRY_NAM)`.
+
+- Total number of areas is `r length(unique(df$GEO_ID))`.
+
+- Number of weeks is `r max(df$week)-min(df$week)+1`.
+
+- Time period of interest is from `r sort(unique(df$week))[1]` until `r tail(sort(unique(df$week)),1)[1]`.
+
+### 2) Geographical distribution of total number of cases
+```{r,echo=FALSE,warning=FALSE}
+narea<-length(unique(df$GEO_ID))
+cases<-df[df$Status=="CASE",]
+deaths<-df[df$Status=="DEATH",]
+cumcases<-unlist(sapply(1:narea,function(i) tail(cases$CountW[cases$GEO_ID==unique(df$GEO_ID)[i]],1)))
+cumdeaths<-unlist(sapply(1:narea,function(i) tail(deaths$CountW[deaths$GEO_ID==unique(df$GEO_ID)[i]],1)))
+cumcases2<-unlist(sapply(1:narea,function(i) max(cases$CountW[cases$GEO_ID==unique(df$GEO_ID)[i]])))
+cumdeaths2<-unlist(sapply(1:narea,function(i) max(deaths$CountW[deaths$GEO_ID==unique(df$GEO_ID)[i]])))
+
+
+# plot cases
+plotvar <- cumcases
+nclr <- 5
+plotclr <- brewer.pal(nclr,"Reds")
+class <- classIntervals(plotvar, nclr, style="fixed",fixedBreaks=c(0,1,10,100,1000,6000))
+colcode <- findColours(class, plotclr)
+
+plot(map)
+plot(map, col=colcode, add=T)
+x0<-bbox(map)[1,1]-0.4
+y0<- bbox(map)[2,1]+2*bbox(map)[2,2]/(bbox(map)[2,2]-bbox(map)[2,1])
+legend(x0,y0, legend=names(attr(colcode, "table")), fill=attr(colcode, "palette"), cex=1, bty="n")
+centroids <- coordinates(map)
+
+title('Cumulative Number of Cases')
+
+# plot deaths
+plotvar <- cumdeaths
+nclr <- 4
+plotclr <- brewer.pal(nclr,"Reds")
+class <- classIntervals(plotvar, nclr, style="fixed",fixedBreaks=c(0,1,10,100,1000,2500))
+colcode <- findColours(class, plotclr)
+
+par(mar = c(3, 3, 2, 0.5), mgp = c(2, 0.5, 0), tcl = -0.3, cex.axis = 0.8,
+    cex.lab = 0.8, cex.main = 1)
+plot(map)
+plot(map, col=colcode, add=T)
+x0<-bbox(map)[1,1]-0.4
+y0<- bbox(map)[2,1]+2*bbox(map)[2,2]/(bbox(map)[2,2]-bbox(map)[2,1])
+legend(x0,y0, legend=names(attr(colcode, "table")), fill=attr(colcode, "palette"), cex=1, bty="n")
+centroids <- coordinates(map)
+title('Cumulative Number of Deaths')
+
+```
+
+```{r,echo=FALSE,warning=FALSE}
+#### neighborhood structure to be considered in the analysis
+
+mapqnb<-poly2nb(map,queen=T)
+g<-nb2mat(mapqnb)
+
+graph = g
+```
+
+
+
+```{r,echo=FALSE,warning=FALSE}
+#### Restructure data for the analyses
+df2<-merge(cases,deaths,by=c("GEO_ID","week"),all=T)
+df2<-df2[,c(1,2,4,5,7,13)]
+names(df2)<-c("GEO_ID","week","GEO_NAME","PARENT_COUNTRY_NAME","cumcases","cumdeaths")
+
+region.unstruct<-unlist(sapply(1:nrow(df2),function(i) {(1:narea)[unique(df2$GEO_ID)==df2$GEO_ID[i]]}))
+df2$region.unstruct<-region.unstruct
+df2$region.struct<-region.unstruct
+
+
+cumcases.new<-NULL
+cases.new<-NULL
+for (i in 1:narea)
+{
+  hlp<-df2$cumcases[df2$GEO_ID==unique(df2$GEO_ID)[i]]
+  if (sum(!is.na(hlp))==0) {hlp<-0}  
+  last<-tail(hlp,1)
+  if (is.na(last)) {last<-hlp[length(hlp)-1];hlp[length(hlp)]<-last}
+  if (length(hlp)>1){
+    for (j in (length(hlp)-1):1)
+    {
+      if (is.na(hlp[j])){hlp[j]<-last}
+      if (hlp[j]>last) {hlp[j]<-last}
+      else {last<-hlp[j]}
+    }
+    hlp2<-hlp
+    hlp2[2:length(hlp)]<-hlp[2:length(hlp)]-hlp[1:(length(hlp)-1)]
+  }
+  if (length(hlp)==1) {hlp2<-hlp}
+  cumcases.new<-c(cumcases.new,hlp)
+  cases.new<-c(cases.new,hlp2)
+}
+
+cumdeaths.new<-NULL
+deaths.new<-NULL
+for (i in 1:narea)
+{
+  hlp<-df2$cumdeaths[df2$GEO_ID==unique(df2$GEO_ID)[i]]
+  last<-tail(hlp,1)
+  if (is.na(last)) {last<-hlp[length(hlp)-1];hlp[length(hlp)]<-last}
+  if (length(hlp)>1){
+    for (j in (length(hlp)-1):1)
+    {
+      if (is.na(hlp[j])){hlp[j]<-last}
+      if (hlp[j]>last) {hlp[j]<-last}
+      else {last<-hlp[j]}
+    }
+    hlp2<-hlp
+    hlp2[2:length(hlp)]<-hlp[2:length(hlp)]-hlp[1:(length(hlp)-1)]
+  }
+  if (length(hlp)==1) {hlp2<-hlp}
+  cumdeaths.new<-c(cumdeaths.new,hlp)
+  deaths.new<-c(deaths.new,hlp2)
+}
+
+
+
+df2$cumcases.new<-cumcases.new
+df2$cumdeaths.new<-cumdeaths.new
+df2$cases<-cases.new
+df2$deaths<-deaths.new
+
+
+data<-cbind(df2$week,df2$week-min(df2$week),df2$cases,df2$deaths,df2$cumcases.new,df2$cumdeaths.new,df2$region.unstruct,df2$region.struct)
+colnames(data)<-c("week","time","cases","deaths","cumcases","cumdeaths","region.unstruct","region.struct")
+data<-as.data.frame(data)
+
+
+data$country<-1
+data$country[df2$PARENT_COUNTRY_NAME=="Sierra Leone"]<-2
+data$country[df2$PARENT_COUNTRY_NAME=="Guinea"]<-3
+data$country[is.na(df2$PARENT_COUNTRY_NAME)]<-3
+data$country2<-0
+data$country2[data$country==2]<-1
+data$country3<-0
+data$country3[data$country==3]<-1
+
+data<-rbind(data,
+            c(20,20,0,0,221,5,42,42,2,1,0),
+            c(21,21,0,0,221,5,42,42,2,1,0),
+            c(20,20,0,0,327,11,43,43,2,1,0),
+            c(21,21,0,0,327,11,43,43,2,1,0))
+
+
+data.add<-as.data.frame(cbind(rep(seq(51,57),15),rep(seq(51,57),15),rep(0,15*7),rep(0,15*7),
+                              unlist(rep(sapply(28:42,function(i){rep(max(data$cumcases[data$region.unstruct==i]),7)}))),
+                              unlist(rep(sapply(28:42,function(i){rep(max(data$cumdeaths[data$region.unstruct==i]),7)}))),
+                              rep(28:42,each=7),rep(28:42,each=7),rep(1,15*7),rep(0,15*7),rep(0,15*7)))
+colnames(data.add)<-c("week","time","cases","deaths","cumcases","cumdeaths","region.unstruct","region.struct","country","country2","country3")
+
+data<-rbind(data,data.add)
+
+# Order data
+data<-data[order(data$week),]
+data<-data[order(data$region.unstruct),]
+
+
+```
+
+### 3)  Plot time-series of new cases per region
+
+```{r,echo=FALSE,warning=FALSE}
+par(mfrow=c(1,1),mar=c(5,3,2,2)+0.1)
+
+plot(data$week,data$cases,xlab="",ylab="new cases", ylim=c(0,1500),type="n",xaxt="n")
+axis(1, at=c(0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60),labels=c("2014-21","2014-25","2014-29","2014-33","2014-37","2014-41","2014-45","2014-49","2015-01","2015-05","2015-09","2015-13","2015-17","2015-21","2015-25","2015-29"), las=2)
+for (i in 1:narea){lines(data$week[data$region.struct==i],data$cases[data$region.struct==i]) }
+title('Number of new cases per week')
+#abline(v=c(27,33,37),col="red")
+
+u<-sort(unique(data$week))
+plot(u,sapply(1:length(u),function(i){sum(data$cases[data$week==u[i]])}),type="l",xlab="",ylab="new cases (overall)",xaxt="n")
+axis(1, at=c(0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60),labels=c("2014-21","2014-25","2014-29","2014-33","2014-37","2014-41","2014-45","2014-49","2015-01","2015-05","2015-09","2015-13","2015-17","2015-21","2015-25","2015-29"), las=2)
+#abline(v=c(27,33,37),col="red")
+title('Number of new cases per week (overall)')
+
+plot(data$week,data$deaths,xlab="",ylab="new deaths", ylim=c(0,500),type="n",xaxt="n")
+axis(1, at=c(0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60),labels=c("2014-21","2014-25","2014-29","2014-33","2014-37","2014-41","2014-45","2014-49","2015-01","2015-05","2015-09","2015-13","2015-17","2015-21","2015-25","2015-29"), las=2)
+for (i in 1:narea){lines(data$week[data$region.struct==i],data$deaths[data$region.struct==i]) }
+#abline(v=c(27,33,37),col="red")
+title('Number of new deaths per week')
+
+plot(data$week,data$cumcases,xlab="",ylab="cumulative cases", ylim=c(0,5000),type="n",xaxt="n")
+axis(1, at=c(0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60),labels=c("2014-21","2014-25","2014-29","2014-33","2014-37","2014-41","2014-45","2014-49","2015-01","2015-05","2015-09","2015-13","2015-17","2015-21","2015-25","2015-29"), las=2)
+for (i in 1:narea){lines(data$week[data$region.struct==i],data$cumcases[data$region.struct==i]) }
+title('Number of cumulative cases per week')
+
+plot(data$week,data$cumdeaths,xlab="",ylab="cumulative deahts", ylim=c(0,2000),type="n",xaxt="n")
+axis(1, at=c(0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60),labels=c("2014-21","2014-25","2014-29","2014-33","2014-37","2014-41","2014-45","2014-49","2015-01","2015-05","2015-09","2015-13","2015-17","2015-21","2015-25","2015-29"), las=2)
+for (i in 1:narea){lines(data$week[data$region.struct==i],data$cumdeaths[data$region.struct==i]) }
+title('Number of cumulative deaths per week')
+
+
+
+
+cumcases.mat<-matrix(rep(NA,length(map@data$GEO_ID)*length(unique(df$Week))),nrow=length(map@data$GEO_ID))
+cumdeaths.mat<-matrix(rep(NA,length(map@data$GEO_ID)*length(unique(df$Week))),nrow=length(map@data$GEO_ID))
+cases.mat<-matrix(rep(NA,length(map@data$GEO_ID)*length(unique(df$Week))),nrow=length(map@data$GEO_ID))
+deaths.mat<-matrix(rep(NA,length(map@data$GEO_ID)*length(unique(df$Week))),nrow=length(map@data$GEO_ID))
+
+v<-sort(unique(data$region.unstruct))
+for (i in 1:length(map@data$GEO_ID))
+{
+  cumcases.mat[i,(data$week[data$region.unstruct==i]+1)]<-data$cumcases[data$region.unstruct==i]
+  cumdeaths.mat[i,(data$week[data$region.unstruct==i]+1)]<-data$cumdeaths[data$region.unstruct==i]
+  cases.mat[i,(data$week[data$region.unstruct==i]+1)]<-data$cases[data$region.unstruct==i]
+  deaths.mat[i,(data$week[data$region.unstruct==i]+1)]<-data$deaths[data$region.unstruct==i]
+}
+
+rownames(cumcases.mat)<-map@data$GEO_ID
+rownames(cumdeaths.mat)<-map@data$GEO_ID
+rownames(cases.mat)<-map@data$GEO_ID
+rownames(deaths.mat)<-map@data$GEO_ID
+
+colnames(cumcases.mat)<-sort(unique(df$Week))
+colnames(cumdeaths.mat)<-sort(unique(df$Week))
+colnames(cases.mat)<-sort(unique(df$Week))
+colnames(deaths.mat)<-sort(unique(df$Week))
+
+
+save(cumcases.mat,file="cumcases.RData")
+save(cumdeaths.mat,file="cumdeaths.RData")
+save(cases.mat,file="cases.RData")
+save(deaths.mat,file="deaths.RData")
+
+
+
+
+
+```
+
+
+#### 4) Data ETU
+```{r,echo=FALSE,warning=FALSE}
+
+########################## 
+# Read in data
+
+
+etu=read.xlsx("~/Dropbox/Christel/Onderzoek/datasets/Ebola/Data/Table_Ebola_RESPONSE_Updated_20150505_copy.xlsx",sheetIndex=1,startRow=99)
+
+
+etu<-etu[,c(1,3,6,8,9,10,11,12,14,15,16,18,20,21,23,24,25,26,27,28,30)]
+names(etu)<-c("etu","GEO_NAME","GEO_ID","W18","W2","W47","W46","W45","W44","W41","W38","W35","W34","W33","W31","W30","W27","W26","W25","W16","W13")
+
+map@data$GEO_ID<-as.factor(as.character(map@data$GEO_ID))
+etu_new<-matrix(rep(0,length(unique(df$GEO_ID))*length(unique(df$Week))),ncol=length(unique(df$Week)))
+rownames(etu_new)<-map@data$GEO_ID
+colnames(etu_new)<-sort(unique(df$Week))
+
+etu_coord<-matrix(rep(NA,length(unique(df$GEO_ID))*2),ncol=2)
+for (i in 1:nrow(etu))
+{
+  etu_new[levels(map@data$GEO_ID)==etu$GEO_ID[i],]<-as.matrix(etu[i,c("W16","W16","W16","W16","W25","W26","W27","W27","W27","W30","W31","W31","W33","W34","W35","W35","W35","W38","W38","W38","W41","W41","W41","W44","W45","W46","W47","W47","W47","W47","W47","W47","W47","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2","W2") ])
+  etu_coord[levels(map@data$GEO_ID)==etu$GEO_ID[i],]<-coordinates(map)[levels(map@data$GEO_ID)==etu$GEO_ID[i],]
+}
+# OPMERKING: AREAS in rijen; WEKEN in kolommen week 2014-21 (0) tot 2015-05 (37)
+
+
+
+
+etu_new[etu_new==1]<-0
+etu_new[etu_new==2]<-2
+etu_new[etu_new==3]<-1
+etu_new[etu_new==4]<-2
+etu_new[etu_new==5]<-1
+etu_new[etu_new==6]<-2
+
+
+save(etu_new,file="etu_update.RData")
+
+```
+
+
+#### 5) MOVIE
+```{r,echo=FALSE,warning=FALSE}
+
+
+# movie cumulative number of cases 
+
+nclr <- 5
+plotclr <- c("white",brewer.pal(nclr,"Reds"))
+class <- classIntervals(data$cumcases,5, style="fixed",fixedBreaks=c(0,1,10,100,1000,3000,6000))
+colcode <- findColours(class, plotclr)
+
+u<-unique(sort(df$week))
+v<-unique(sort(df$Week))
+
+library(animation)
+
+saveHTML({
+  ani.options(interval = 0.5, nmax = 30)
+  par(mar = c(3, 3, 2, 0.5), mgp = c(2, 0.5, 0), tcl = -0.3, cex.axis = 0.8,
+      cex.lab = 0.8, cex.main = 1)
+  
+  for (i in 1:length(u))
+  {
+    var<-data$cumcases[data$week==u[i]]
+    code<-rep("white",narea)
+    code[data$region.unstruct[data$week==u[i]]]<-colcode[data$week==u[i]]
+    plot(map)
+    plot(map, col=code, add=T)
+    legend("bottomleft", legend=names(attr(colcode, "table")), fill=attr(colcode, "palette"), cex=1, bty="n",
+           title="cumul cases")
+    centroids <- coordinates(map)
+    
+    
+    col=c("#B38481","#7F525D")[etu_new[,i][(etu_new[,i]>0)]]
+    points(etu_coord[(etu_new[,i]>0),],pch=18,col=col)
+    #points(etu_coord[(etu_new[,i]>1),],pch=18,col="#B38481")
+    title(c("Week" , as.character(v[i])))
+    legend("bottom", legend=c("1","2"), col=c("#B38481","#7F525D"),pch=18, bty="n",title="ETU")
+  }
+  
+}, img.name = "cumcases", imgdir="cumcases",title = "Ebola Cumulative Number of Cases",outdir=getwd())
+
+
+# movie cumulative number of deaths
+
+nclr <- 5
+plotclr <- c("white",brewer.pal(nclr,"Reds"))
+class <- classIntervals(data$cumdeaths,5, style="fixed",fixedBreaks=c(0,1,10,110,1100,2200,4600))
+colcode <- findColours(class, plotclr)
+
+u<-unique(sort(df$week))
+v<-unique(sort(df$Week))
+
+library(animation)
+
+saveHTML({
+  ani.options(interval = 0.5, nmax = 30)
+  par(mar = c(3, 3, 2, 0.5), mgp = c(2, 0.5, 0), tcl = -0.3, cex.axis = 0.8,
+      cex.lab = 0.8, cex.main = 1)
+  
+  for (i in 1:length(u))
+  {
+    var<-data$cumdeaths[data$week==u[i]]
+    code<-rep("white",narea)
+    code[data$region.unstruct[data$week==u[i]]]<-colcode[data$week==u[i]]
+    plot(map)
+    plot(map, col=code, add=T)
+    legend("bottomleft", legend=names(attr(colcode, "table")), fill=attr(colcode, "palette"), cex=1, bty="n",
+           title="cumul deaths")
+    centroids <- coordinates(map)
+    
+    col=c("#B38481","#7F525D")[etu_new[,i][(etu_new[,i]>0)]]
+    points(etu_coord[(etu_new[,i]>0),],pch=18,col=col)
+    #points(etu_coord[(etu_new[,i]>1),],pch=18,col="#B38481")
+    title(c("Week" , as.character(v[i])))
+    legend("bottom", legend=c("1","2"), col=c("#B38481","#7F525D"),pch=18, bty="n",title="ETU")
+  }
+  
+}, img.name = "cumdeaths", imgdir="cumdeaths", title = "Ebola Cumulative Number of Deaths",outdir=getwd())
+
+
+
+
+```
+
+
+### 4)  Non-linear Growth rate models
+
+##### Comparison between different models:
+##### -- negative binomial model
+##### -- spatially structured effects (besag)
+##### -- flexible time trend per area: autoregressive process (AR1) or random walk process (RW1 or RW2)
+##### -- county-effect as fixed effect
+```{r,echo=FALSE,warning=FALSE}
+data$region.struct2<-data$region.struct
+
+## TYPE2: The following models assume at each time the points are spatially correlated, while across the time periods, they evolve according to AR1/RW1/RW2 process. 
+data$time2<-data$time+1
+formula3f = cases ~  country2 + country3 +f(region.struct,model="besag", group=time2, control.group=list(model="ar1"), graph=graph)
+formula3g = cases ~  country2 + country3 +f(region.struct,model="besag", group=time2, control.group=list(model="rw1"), graph=graph)
+formula3h = cases ~  country2 + country3 +f(region.struct,model="besag", group=time2, control.group=list(model="rw2"), graph=graph)
+
+# negative binomial model
+fit1i <- inla(formula3f, family="nbinomial", data = data, control.predictor=list(compute=TRUE), 
+              control.family=list(link="log"),control.compute=list(dic=TRUE,cpo=TRUE)) 
+fit1j <- inla(formula3g, family="nbinomial", data = data, control.predictor=list(compute=TRUE), 
+              control.family=list(link="log"),control.compute=list(dic=TRUE,cpo=TRUE)) 
+fit1k <- inla(formula3h, family="nbinomial", data = data, control.predictor=list(compute=TRUE), 
+              control.family=list(link="log"),control.compute=list(dic=TRUE,cpo=TRUE)) 
+
+# poisson model
+fit1l <- inla(formula3f, family="poisson", data = data, control.predictor=list(compute=TRUE), 
+              control.family=list(link="log"),control.compute=list(dic=TRUE,cpo=TRUE)) 
+fit1m <- inla(formula3g, family="poisson", data = data, control.predictor=list(compute=TRUE), 
+              control.family=list(link="log"),control.compute=list(dic=TRUE,cpo=TRUE)) 
+fit1n <- inla(formula3h, family="poisson", data = data, control.predictor=list(compute=TRUE), 
+              control.family=list(link="log"),control.compute=list(dic=TRUE,cpo=TRUE)) 
+
+```
+
+##### Model comparison
+```{r,echo=FALSE,warning=FALSE}
+dic.models<-rbind(
+  cbind("ar1+nbin Type2",fit1i$dic$dic,fit1i$dic$p.eff,-mean(log(fit1i$cpo$cpo))),
+  cbind("rw1+nbin Type2",fit1j$dic$dic,fit1j$dic$p.eff,-mean(log(fit1j$cpo$cpo))),
+  cbind("rw2+nbin Type2",fit1k$dic$dic,fit1k$dic$p.eff,-mean(log(fit1k$cpo$cpo))),
+  cbind("ar1+poi Type2",fit1l$dic$dic,fit1l$dic$p.eff,-mean(log(fit1l$cpo$cpo))),
+  cbind("rw1+poi Type2",fit1m$dic$dic,fit1m$dic$p.eff,-mean(log(fit1m$cpo$cpo))),
+  cbind("rw2+poi Type2",fit1n$dic$dic,fit1n$dic$p.eff,-mean(log(fit1n$cpo$cpo)))
+)
+colnames(dic.models)<-c("model","DIC","pD","cpo")
+
+dic.models
+
+fit1<-fit1i  # model has smallest DIC, smallest pD and smallest CPO
+
+summary(fit1)
+
+```
+
+> dic.models
+model            DIC                    pD                     cpo               
+[1,] "ar1+nbin Type2" "10660.0525381559"     "583.046623714203"     "2.93881494413852"
+[2,] "rw1+nbin Type2" "11793.7802165965"     "1218.03248710857"     "13.1988760709058"
+[3,] "rw2+nbin Type2" "NaN"                  "NaN"                  "23.5175269572577"
+[4,] "ar1+poi Type2"  "8543.73056865342"     "1374.90931175847"     "6.16062029163567"
+[5,] "rw1+poi Type2"  "1.40522744928232e+20" "70261372464116064256" "15.2452845458308"
+[6,] "rw2+poi Type2"  "NaN"                  "NaN"                  "39.3093488052"  
+
+##### Plot results growth rate model 
+
+```{r,echo=FALSE,warning=FALSE}
+### PLOT 1
+plot(data$week,log(data$cases),xlab="week",ylab="log(new cases)",type="n")
+for (i in 1:narea){
+  lines(data$week[data$region.struct==i],log(data$cases[data$region.struct==i]),type="b",
+        col="blue") 
+}
+
+title("Estimated number of new cases")
+for (i in 1:length(unique(data$region.unstruct)))
+{
+  u<-unique(data$region.unstruct)
+  lines(data$week[data$region.unstruct==u[i]],fit1$summary.linear.predictor[data$region.unstruct==u[i],4])
+}
+
+
+### PLOT 2
+plot(data$week,log(data$cumcases),xlab="week",ylab="log(cases)",type="n")
+for (i in 1:narea){
+  lines(data$week[data$region.struct==i],log(data$cumcases[data$region.struct==i]),type="b",
+        col="blue") 
+}
+
+title("Estimated number of cumulative cases")
+for (i in 1:length(unique(data$region.unstruct)))
+{
+  u<-unique(data$region.unstruct)
+  lines(data$week[data$region.unstruct==u[i]],log(cumsum(exp(fit1$summary.linear.predictor[data$region.unstruct==u[i],4]))))
+}
+
+
+### PLOT 3
+u<-unique(data$region.unstruct)
+i<-1
+plot(min(data$week):max(data$week),fit1$summary.random$region.struct$mean[fit1$summary.random$region.struct$ID==u[i]],type="n",ylim=c(-20,20),ylab="f(t)",xlab="week")
+for (i in 1:length(unique(data$region.unstruct)))
+{
+  u<-unique(data$region.unstruct)
+  col<-"black"
+  diff<-fit1$summary.random$region.struct$mean[fit1$summary.random$region.struct$ID==u[i]][22]-fit1$summary.random$region.struct$mean[fit1$summary.random$region.struct$ID==u[i]][1]
+  col[diff>0]<-"red"
+  lines(min(data$week):max(data$week),fit1$summary.random$region.struct$mean[fit1$summary.random$region.struct$ID==u[i]],col=col)
+}
+title("Estimated Time Trend (without peaks)")
+
+
+```
+
+
+
+##### Plots time trend per area
+```{r,echo=FALSE,warning=FALSE} 
+
+trend.country<-function(i)
+{
+  t<-sort(unique(data$week))
+  u<-unique(data$region.unstruct)
+  col<-"black"
+  diff<-fit1$summary.random$region.struct$mean[fit1$summary.random$region.struct$ID==u[i]][22]-fit1$summary.random$region.struct$mean[fit1$summary.random$region.struct$ID==u[i]][1]
+  col[diff>0]<-"red"
+  
+  select<-unique(data$week[data$region.unstruct==u[i]])-min(t)+1
+  plot(t,fit1$summary.random$region.struct$mean[fit1$summary.random$region.struct$ID==u[i]],col=col,ylab="f(t)",xlab="week",type="n",ylim=c(-9,6))
+  lines(t[select],fit1$summary.random$region.struct$mean[fit1$summary.random$region.struct$ID==u[i]][select],col=col,ylab="f(t)",xlab="week",type="l",ylim=c(-9,6))
+  
+}
+
+# Guinea
+par(mfrow=c(2,4))
+trend.country(i=1); title("Boke")
+trend.country(i=2); title("Conakry")
+trend.country(i=3); title("Boffa")
+trend.country(i=4); title("Dabola")
+trend.country(i=5); title("Dinguiraye")
+trend.country(i=6); title("Faranah")
+trend.country(i=7); title("Kissidougou")
+trend.country(i=8); title("Kankan")
+trend.country(i=9); title("Kerouane")
+trend.country(i=10); title("Kouroussa")
+trend.country(i=11); title("Siguiri")
+trend.country(i=12); title("Coyah")
+
+trend.country(i=13); title("Dubreka")
+trend.country(i=14); title("Forecariah")
+trend.country(i=15); title("Kindia")
+trend.country(i=16); title("Telemele")
+trend.country(i=17); title("Dalaba")
+trend.country(i=18); title("Mamou")
+trend.country(i=19); title("Pita")
+trend.country(i=20); title("Beyla")
+trend.country(i=21); title("Gueckedou")
+trend.country(i=22); title("Lola")
+trend.country(i=23); title("Macenta")
+trend.country(i=24); title("Nzerekore")
+trend.country(i=25); title("Yomou")
+
+# Liberia
+par(mfrow=c(2,4))
+trend.country(i=26); title("Bomi")
+trend.country(i=27); title("Bong")
+trend.country(i=28); title("Gbarpolu")
+trend.country(i=29); title("Grand Bassa")
+trend.country(i=30); title("Grand Cape Mount")
+trend.country(i=31); title("Grand Gedeh")
+trend.country(i=32); title("Grand Kru")
+trend.country(i=33); title("Lofa")
+
+trend.country(i=34); title("Margibi")
+trend.country(i=35); title("Maryland")
+trend.country(i=36); title("Montserrado")
+trend.country(i=37); title("Nimba")
+trend.country(i=38); title("Rivercess")
+trend.country(i=39); title("River Gee")
+trend.country(i=40); title("Sinoe")
+
+# Sierra Leone
+par(mfrow=c(2,4))
+trend.country(i=41); title("Western Area")
+trend.country(i=42); title("Kailahun")
+trend.country(i=43); title("Kenema")
+trend.country(i=44); title("Kono")
+trend.country(i=45); title("Bombali")
+trend.country(i=46); title("Kambia")
+trend.country(i=47); title("Koinadugu")
+trend.country(i=48); title("Port Loko")
+
+trend.country(i=49); title("Tonkolili")
+trend.country(i=50); title("Bo")
+trend.country(i=51); title("Bonthe")
+trend.country(i=50); title("Moyamba")
+trend.country(i=51); title("Pujehun")
+
+```
+
+
+
+
+#####  Calculation GROWTH RATE
+###### plot of weekly growth rate
+###### in red: 4th successive week growth<0
+```{r,echo=FALSE,warning=FALSE}
+##### Calculate posterior growth rate
+nweeks<-length(unique(data$time))
+grate<-matrix(NA,nweeks,narea)
+grate.ll<-matrix(NA,nweeks,narea)
+grate.ul<-matrix(NA,nweeks,narea)
+
+# growth = u_(t+1)-u(t)
+#n<-nrow(fit1m$summary.random$time)
+n<-nrow(fit1$summary.random$region.struct)
+BB = matrix(rep(c(rep(NA,n)),n),nrow=n)
+
+for (i in 1:n)
+{
+  if (i<=narea) {BB[i,i+narea]<-1;BB[i,i]<--1}
+  if (i>=(n-narea+1)) {BB[i,i]<-1;BB[i,i-narea]<--1}
+  if (i>narea & i<(n-narea+1)){BB[i,i+narea]<-1/2;BB[i,i-narea]<--1/2}
+  if (i>(2*narea) & i<(n-(2*narea)+1))
+  {BB[i,i+2*narea]<--1/12;BB[i,i+narea]<-8/12;BB[i,i-narea]<--8/12;BB[i,i-2*narea]<-1/12}
+  if (i>(3*narea) & i<(n-(3*narea)+1))
+  {BB[i,i+3*narea]<-1/60;BB[i,i+2*narea]<--3/20;BB[i,i+narea]<-3/4;
+   BB[i,i-narea]<--3/4;BB[i,i-2*narea]<-3/20;BB[i,i-3*narea]<--1/60}
+  if (i>(4*narea) & i<(n-(4*narea)+1))
+  {BB[i,i+4*narea]<--1/280;BB[i,i+3*narea]<-4/105;BB[i,i+2*narea]<--1/5;BB[i,i+narea]<-4/5;
+   BB[i,i-narea]<--4/5;BB[i,i-2*narea]<-1/5;BB[i,i-3*narea]<--4/105;BB[i,i-4*narea]<-1/280}
+}
+
+
+lc = inla.make.lincombs(region.struct=BB)
+names(lc) = "lc"
+
+formula = cases ~  country2 + country3 +f(region.struct,model="besag", group=time2, control.group=list(model="ar1"), graph=graph)
+
+
+fit1 <- inla(formula, family="nbinomial", data = data, control.predictor=list(compute=TRUE), 
+             control.family=list(link="log"),lincomb =lc,control.compute=list(dic=TRUE),
+             control.inla= list(lincomb.derived.only=TRUE,verbose=T)) 
+
+grate<-fit1$summary.lincomb.derived$mean
+grate.ll<-fit1$summary.lincomb.derived[,4]
+grate.ul<-fit1$summary.lincomb.derived[,6]
+
+
+grate<-matrix(grate,ncol=narea,byrow=T)
+grate.ll<-matrix(grate.ll,ncol=narea,byrow=T)
+grate.ul<-matrix(grate.ul,ncol=narea,byrow=T)
+
+
+# plot of weekly growth rate
+# in red: 4th successive week growth<0
+grate.new<-grate*NA
+par(mfrow=c(1,1))
+t<-sort(unique(data$week))
+plot(t,grate[,1],type="n",ylim=c(-2,2),xlab="week",ylab="growth rate")
+for (i in 1:narea)
+{
+  lines(t,grate[,i])
+  col.red<-rep("black",(nweeks-1))
+  col.red[4:length(t)][(grate[4:length(t),i]<0)&(grate[3:(length(t)-1),i]<0)&(grate[2:(length(t)-2),i]<0)&(grate[1:(length(t)-3),i]<0)]<-"red"
+  
+  points(t,grate[,i],col=col.red)
+  
+  select<-unique(data$week[data$region.unstruct==u[i]])-min(t)+1
+  grate.new[select,i]<-grate[select,i]
+  
+}
+title("Weekly Growth Rate")
+
+
+
+colnames(grate.new)<-unique(df$GEO_ID)
+rownames(grate.new)<-sort(unique(df$Week))
+
+save(grate.new,file="grate.RData")
+
+
+```
+
+
+##### Plots growth rate per area
+```{r,echo=FALSE,warning=FALSE} 
+
+growth.country<-function(i)
+{
+  t<-sort(unique(data$week))
+  u<-unique(data$region.unstruct)
+  col.red<-rep("black",(nweeks-1))
+  #col.red[4:length(t)][(grate[4:length(t),i]<0)&(grate[3:(length(t)-1),i]<0)&(grate[2:(length(t)-2),i]<0)&(grate[1:(length(t)-3),i]<0)]<-"red"
+  col.red[grate.ul[,i]<0]<-"blue"
+  col.red[grate.ll[,i]>0]<-"red"
+  select<-unique(data$week[data$region.unstruct==u[i]])-min(t)+1
+  plot(t,grate[,i],xlab="week",ylab="growth rate",ylim=c(-2,2),type="n")
+  lines(t[select],grate[select,i],xlab="week",ylab="growth rate",ylim=c(-2,2),type="l")
+  points(t[select],grate[select,i],col=col.red[select])
+  lines(t,rep(0,length(t)),lty=16)
+}
+
+#df2$GEO_NAME.x[df2$region.unstruct==51]
+
+# Guinea
+par(mfrow=c(2,4))
+growth.country(i=1); title("Boke")
+growth.country(i=2); title("Conakry")
+growth.country(i=3); title("Boffa")
+growth.country(i=4); title("Dabola")
+growth.country(i=5); title("Dinguiraye")
+growth.country(i=6); title("Faranah")
+growth.country(i=7); title("Kissidougou")
+growth.country(i=8); title("Kankan")
+growth.country(i=9); title("Kerouane")
+growth.country(i=10); title("Kouroussa")
+growth.country(i=11); title("Siguiri")
+growth.country(i=12); title("Coyah")
+
+growth.country(i=13); title("Dubreka")
+growth.country(i=14); title("Forecariah")
+growth.country(i=15); title("Kindia")
+growth.country(i=16); title("Telemele")
+growth.country(i=17); title("Dalaba")
+growth.country(i=18); title("Mamou")
+growth.country(i=19); title("Pita")
+growth.country(i=20); title("Beyla")
+growth.country(i=21); title("Gueckedou")
+growth.country(i=22); title("Lola")
+growth.country(i=23); title("Macenta")
+growth.country(i=24); title("Nzerekore")
+growth.country(i=25); title("Yomou")
+
+# Liberia
+par(mfrow=c(2,4))
+growth.country(i=26); title("Bomi")
+growth.country(i=27); title("Bong")
+growth.country(i=28); title("Gbarpolu")
+growth.country(i=29); title("Grand Bassa")
+growth.country(i=30); title("Grand Cape Mount")
+growth.country(i=31); title("Grand Gedeh")
+growth.country(i=32); title("Grand Kru")
+growth.country(i=33); title("Lofa")
+
+growth.country(i=34); title("Margibi")
+growth.country(i=35); title("Maryland")
+growth.country(i=36); title("Montserrado")
+growth.country(i=37); title("Nimba")
+growth.country(i=38); title("Rivercess")
+growth.country(i=39); title("River Gee")
+growth.country(i=40); title("Sinoe")
+
+# Sierra Leone
+par(mfrow=c(2,4))
+growth.country(i=41); title("Western Area")
+growth.country(i=42); title("Kailahun")
+growth.country(i=43); title("Kenema")
+growth.country(i=44); title("Kono")
+growth.country(i=45); title("Bombali")
+growth.country(i=46); title("Kambia")
+growth.country(i=47); title("Koinadugu")
+growth.country(i=48); title("Port Loko")
+
+growth.country(i=49); title("Tonkolili")
+growth.country(i=50); title("Bo")
+growth.country(i=51); title("Bonthe")
+growth.country(i=50); title("Moyamba")
+growth.country(i=51); title("Pujehun")
+
+
+
+
+u<-unique(sort(df$week))
+v<-unique(sort(df$Week))
+
+library(animation)
+
+saveHTML({
+  ani.options(interval = 0.5, nmax = 30)
+  par(mar = c(3, 3, 2, 0.5), mgp = c(2, 0.5, 0), tcl = -0.3, cex.axis = 0.8,
+      cex.lab = 0.8, cex.main = 1)
+  
+  for (i in 1:length(u))
+  {
+    var<-grate[i,]
+    nclr <- 6
+    plotclr <- rev(brewer.pal(nclr,"RdBu"))
+    class <- classIntervals(var,6, style="fixed",fixedBreaks=c(-2,-1,-0.5,0,0.5,1,2))
+    colcode <- findColours(class, plotclr)
+    
+    colcode[-c(data$region.unstruct[data$week==u[i]])]<-"white"
+    
+    plot(map)
+    plot(map, col=colcode, add=T)
+    legend("bottomleft", legend=names(attr(colcode, "table")), fill=attr(colcode, "palette"), cex=1, bty="n",
+           title="growth rate")
+    centroids <- coordinates(map)
+    
+    col=c("#B38481","#7F525D")[etu_new[,i][(etu_new[,i]>0)]]
+    points(etu_coord[(etu_new[,i]>0),],pch=18,col=col)
+    title(c("Week" , as.character(v[i])))
+    legend("bottom", legend=c("1","2"), col=c("#B38481","#7F525D"),pch=18, bty="n",title="ETU")
+    
+  }
+  
+}, img.name = "growth", imgdir="growth", title = "Ebola Growth Rate",outdir=getwd())
+
+
+
+```
+
+##### Plots heat map: growth rates and interventions
+```{r,echo=FALSE,warning=FALSE} 
+
+# estimated growth rates, numbers and and ETU's
+cumcases = cumcases.mat; cumdeaths = cumdeaths.mat
+grate = grate.new; etu = etu_new
+
+# linking ID to region name
+cn = colnames(grate)
+region.names = rep(NA,length(cn))
+for (i in 1:length(cn)){
+  region.names[i] = as.character(df$GEO_NAME[df$GEO_ID==cn[i]])[1]
+}
+colnames(grate)=region.names
+
+cn = rownames(etu)
+region.names = rep(NA,length(cn))
+for (i in 1:length(cn)){
+  region.names[i] = as.character(df$GEO_NAME[df$GEO_ID==cn[i]])[1]
+}
+rownames(etu)=region.names
+etu = t(etu)
+
+cn = rownames(cumcases)
+region.names = rep(NA,length(cn))
+for (i in 1:length(cn)){
+  region.names[i] = as.character(df$GEO_NAME[df$GEO_ID==cn[i]])[1]
+}
+rownames(cumcases)=region.names
+cumcases = t(cumcases); l.cumcases = log(cumcases+1) 
+
+cn = rownames(cumdeaths)
+region.names = rep(NA,length(cn))
+for (i in 1:length(cn)){
+  region.names[i] = as.character(df$GEO_NAME[df$GEO_ID==cn[i]])[1]
+}
+rownames(cumdeaths)=region.names
+cumdeaths = t(cumdeaths); l.cumdeaths = log(cumdeaths+1) 
+
+# matching grate and etu
+etu.grate = matrix(NA,dim(etu)[1],dim(etu)[2]); rownames(etu.grate)=rownames(etu); colnames(etu.grate)=colnames(etu)
+for (j in 1:dim(grate)[2]){
+  etu.grate[,j] = etu[,colnames(etu)==colnames(grate)[j]]
+  colnames(etu.grate)[j] = colnames(grate)[j]
+}
+
+# plot
+
+x = which(etu.grate!=0,arr.ind=T)[,1]; names(x)=NULL
+y = which(etu.grate!=0,arr.ind=T)[,2]; names(y)= NULL
+z = c(etu.grate[etu.grate!=0])
+z.col = z; z.col[z.col==1]="#B38481"; z.col[z.col==2]="#7F525D";
+
+col = c("#0571B0","#75B4D4","#CEE3ED","#F5D6C8","#EB836E","#CA0020")
+int = c(-2,-1,-0.5,0,0.5,1,2)
+windows(record=TRUE, width=7.5, height=7)
+levelplot(grate,col.regions=col,at=int,scales=list(x=list(rot=45,cex=.5),y=list(cex=.5)),
+          ylab=list(label="Region",cex=1),xlab=list(label="Week",cex=1),
+          colorkey=list(labels=list(at=int)),
+          panel=function(...) {
+            panel.levelplot(...)
+            panel.points(x=x, y=y, type="p",pch=21,fill=z.col,col=z.col,cex=0.7)
+          }) 
+```
